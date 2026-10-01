@@ -1,183 +1,300 @@
 from collections import deque
-from itertools import permutations
-from typing import Dict, Tuple, FrozenSet, Set
-from map_parser import State, identify_corner_deadlocks
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
+from map_parser import State
 
-_GOAL_DISTANCE_CACHE: Dict[Tuple[int, int], Dict[Tuple[int, int], int]] = {}
-_DEADLOCK_CACHE: Dict[Tuple[Tuple[str, ...], ...], Set[Tuple[int, int]]] = {}
+Cell = Tuple[int, int]
+Grid = Tuple[Tuple[str, ...], ...]
 
+DEADLOCK_VALUE = 100_000 # prunes h >= 100_000
+UNREACHABLE = DEADLOCK_VALUE
+USE_PUSH_DISTANCE = True # False -> plain maze (walking) BFS distance
+_MEMO_LIMIT = 1_000_000
+
+_DIRS = ((0, -1), (0, 1), (1, 0), (-1, 0))
 
 def precompute_maze_distances(
-    grid: Tuple[Tuple[str, ...], ...],
-    goals: FrozenSet[Tuple[int, int]]
-) -> Dict[Tuple[int, int], Dict[Tuple[int, int], int]]:
-    """
-    Precompute BFS maze distances from every floor cell to each goal position.
-    Uses backward BFS from each goal, avoiding wall cells ('%').
-    Returns a mapping: distance_map[goal][(x, y)] -> minimum step count.
-    """
+    grid: Grid,
+    goals: FrozenSet[Cell],
+) -> Dict[Cell, Dict[Cell, int]]:
     height = len(grid)
-    width = len(grid[0]) if height > 0 else 0
-    distance_map = {}
+    width = len(grid[0]) if height else 0
+    distance_map: Dict[Cell, Dict[Cell, int]] = {}
 
     for goal in goals:
-        distance_map[goal] = {}
-        queue = deque([(goal[0], goal[1], 0)])
-        visited = {goal}
-        distance_map[goal][goal] = 0
-
-        while queue:
-            x, y, dist = queue.popleft()
-
-            for dx, dy in [(0, -1), (0, 1), (1, 0), (-1, 0)]:
-                nx, ny = x + dx, y + dy
-
-                if 0 <= nx < width and 0 <= ny < height:
-                    if grid[ny][nx] != '%' and (nx, ny) not in visited:
-                        visited.add((nx, ny))
-                        distance_map[goal][(nx, ny)] = dist + 1
-                        queue.append((nx, ny, dist + 1))
+        dist = {goal: 0}
+        frontier = [goal]
+        d = 0
+        while frontier:
+            d += 1
+            nxt = []
+            for x, y in frontier:
+                for dx, dy in _DIRS:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height and grid[ny][nx] != '%':
+                        c = (nx, ny)
+                        if c not in dist:
+                            dist[c] = d
+                            nxt.append(c)
+            frontier = nxt
+        distance_map[goal] = dist
 
     return distance_map
 
 
-def get_precomputed_distances(state: State) -> Dict[Tuple[int, int], Dict[Tuple[int, int], int]]:
-    """Return (or initialize) the cached maze distance table for the current state."""
-    global _GOAL_DISTANCE_CACHE
-    sample_goal = next(iter(state.goals)) if state.goals else None
-    if sample_goal is None or sample_goal not in _GOAL_DISTANCE_CACHE:
-        _GOAL_DISTANCE_CACHE = precompute_maze_distances(state.grid, state.goals)
-    return _GOAL_DISTANCE_CACHE
+def precompute_push_distances(
+    grid: Grid,
+    goals: FrozenSet[Cell],
+) -> Dict[Cell, Dict[Cell, int]]:
+    
+    height = len(grid)
+    width = len(grid[0]) if height else 0
+    floor = [[grid[y][x] != '%' for x in range(width)] for y in range(height)]
+    push_map: Dict[Cell, Dict[Cell, int]] = {}
+
+    for goal in goals:
+        dist = {goal: 0}
+        frontier = [goal]
+        d = 0
+        while frontier:
+            d += 1
+            nxt = []
+            for x, y in frontier:
+                for dx, dy in _DIRS:
+                    ax, ay = x - 2 * dx, y - 2 * dy          # agent cell (bounds imply c in bounds)
+                    if 0 <= ax < width and 0 <= ay < height:
+                        cx, cy = x - dx, y - dy
+                        if floor[cy][cx] and floor[ay][ax]:
+                            c = (cx, cy)
+                            if c not in dist:
+                                dist[c] = d
+                                nxt.append(c)
+            frontier = nxt
+        push_map[goal] = dist
+
+    return push_map
+
+class _Context:
+    __slots__ = ("grid", "goals", "goal_list", "dist_by_goal", "rows", "dead", "memo_match", "memo_nearest")
+
+    def __init__(self, grid: Grid, goals: FrozenSet[Cell]):
+        self.grid = grid
+        self.goals = goals
+        self.goal_list: List[Cell] = sorted(goals)
+
+        push = precompute_push_distances(grid, goals)
+        alive: Set[Cell] = set()
+        for g in self.goal_list:
+            alive.update(push[g])
+
+        height = len(grid)
+        width = len(grid[0]) if height else 0
+        self.dead: Set[Cell] = {
+            (x, y)
+            for y in range(height) for x in range(width)
+            if grid[y][x] != '%' and (x, y) not in alive
+        }
+
+        self.dist_by_goal = push if USE_PUSH_DISTANCE else precompute_maze_distances(grid, goals)
+
+        cells: Set[Cell] = set()
+        for g in self.goal_list:
+            cells.update(self.dist_by_goal[g])
+        tables = [self.dist_by_goal[g] for g in self.goal_list]
+        self.rows: Dict[Cell, Tuple[int, ...]] = {
+            c: tuple(t.get(c, UNREACHABLE) for t in tables) for c in cells
+        }
+
+        self.memo_match: Dict[FrozenSet[Cell], int] = {}
+        self.memo_nearest: Dict[FrozenSet[Cell], int] = {}
 
 
-def get_deadlock_set(state: State) -> Set[Tuple[int, int]]:
-    """Return (or initialize) the set of static corner deadlock positions for the current state."""
-    global _DEADLOCK_CACHE
-    if state.grid not in _DEADLOCK_CACHE:
-        _DEADLOCK_CACHE[state.grid] = identify_corner_deadlocks(state.grid, state.goals)
-    return _DEADLOCK_CACHE[state.grid]
+_CONTEXTS: Dict[Tuple[Grid, FrozenSet[Cell]], _Context] = {}
+_last: Optional[_Context] = None
 
+
+def clear_heuristic_caches() -> None:
+    global _last
+    _CONTEXTS.clear()
+    _last = None
+
+
+def _get_context(state: State) -> _Context:
+    global _last
+    ctx = _last
+    if ctx is not None and ctx.grid is state.grid and ctx.goals is state.goals:
+        return ctx
+    key = (state.grid, state.goals)
+    ctx = _CONTEXTS.get(key)
+    if ctx is None:
+        ctx = _Context(state.grid, state.goals)
+        _CONTEXTS[key] = ctx
+    _last = ctx
+    return ctx
+
+
+def get_precomputed_distances(state: State) -> Dict[Cell, Dict[Cell, int]]:
+    return _get_context(state).dist_by_goal
+
+
+def get_deadlock_set(state: State) -> Set[Cell]:
+    return _get_context(state).dead
+
+def _hungarian(cost: List[List[int]], n: int, m: int) -> int:
+    big = 1 << 60
+    u = [0] * (n + 1)
+    v = [0] * (m + 1)
+    p = [0] * (m + 1)
+    way = [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [big] * (m + 1)
+        used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            row = cost[i0 - 1]
+            ui0 = u[i0]
+            delta = big
+            j1 = 0
+            for j in range(1, m + 1):
+                if not used[j]:
+                    cur = row[j - 1] - ui0 - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    return -v[0]
 
 def heuristic_maze_min_matching(state: State) -> int:
-    """
-    Primary heuristic: BFS Maze Distance with Optimal Bipartite Goal Assignment.
-    Returns the minimum total maze distance over all box-to-goal assignments.
-    Applies deadlock detection and falls back to greedy matching for more than 4 boxes.
-    """
-    deadlocks = get_deadlock_set(state)
-    for box in state.boxes:
-        if box in deadlocks:
-            return 100_000
+    ctx = _get_context(state)
+    boxes = state.boxes
 
-    if state.is_goal_state():
+    cached = ctx.memo_match.get(boxes)
+    if cached is not None:
+        return cached
+
+    result = _min_matching(ctx, boxes)
+    if len(ctx.memo_match) >= _MEMO_LIMIT:
+        ctx.memo_match.clear()
+    ctx.memo_match[boxes] = result
+    return result
+
+
+def _min_matching(ctx: _Context, boxes: FrozenSet[Cell]) -> int:
+    dead = ctx.dead
+    rows = ctx.rows
+    goals = ctx.goals
+
+    free: List[Tuple[int, ...]] = []
+    for b in boxes:
+        if b in dead:
+            return DEADLOCK_VALUE
+        if b in goals:
+            continue
+        row = rows.get(b)
+        if row is None:
+            return DEADLOCK_VALUE
+        free.append(row)
+
+    n = len(free)
+    if n == 0:
         return 0
 
-    dist_cache = get_precomputed_distances(state)
-    boxes = list(state.boxes)
-    goals = list(state.goals)
+    gidx = [i for i, g in enumerate(ctx.goal_list) if g not in boxes]
+    m = len(gidx)
+    if n > m:
+        total = sum(min(r) for r in free)
+        return DEADLOCK_VALUE if total >= DEADLOCK_VALUE else total
 
-    if len(boxes) <= 4 and len(boxes) == len(goals):
-        min_total = float('inf')
-        for perm in permutations(goals):
-            total = 0
-            for b, g in zip(boxes, perm):
-                d = dist_cache.get(g, {}).get(b, float('inf'))
-                total += d
-            if total < min_total:
-                min_total = total
-        return min_total if min_total != float('inf') else 100_000
+    matrix = [[r[j] for j in gidx] for r in free]
 
-    unassigned_goals = set(goals)
-    total_distance = 0
+    if n == 1:
+        total = min(matrix[0])
+    elif n == 2 and m == 2:
+        a, b = matrix
+        total = min(a[0] + b[1], a[1] + b[0])
+    elif n == 3 and m == 3:
+        a, b, c = matrix
+        total = min(a[0] + b[1] + c[2], a[0] + b[2] + c[1],
+                    a[1] + b[0] + c[2], a[1] + b[2] + c[0],
+                    a[2] + b[0] + c[1], a[2] + b[1] + c[0])
+    else:
+        total = _hungarian(matrix, n, m)
 
-    for box in boxes:
-        if box in unassigned_goals:
-            unassigned_goals.remove(box)
-            continue
-
-        best_goal = None
-        best_dist = float('inf')
-        for goal in unassigned_goals:
-            d = dist_cache.get(goal, {}).get(box, float('inf'))
-            if d < best_dist:
-                best_dist = d
-                best_goal = goal
-
-        if best_goal is not None:
-            total_distance += best_dist
-            unassigned_goals.remove(best_goal)
-        else:
-            total_distance += 50
-
-    return total_distance
+    return DEADLOCK_VALUE if total >= DEADLOCK_VALUE else total
 
 
 def heuristic_maze_nearest_goal(state: State) -> int:
-    """
-    Simple heuristic: sum of BFS distances from each box to its nearest goal.
-    Admissible and consistent; runs in O(|Boxes| * |Goals|).
-    """
-    deadlocks = get_deadlock_set(state)
-    for box in state.boxes:
-        if box in deadlocks:
-            return 100_000
+    ctx = _get_context(state)
+    boxes = state.boxes
 
-    if state.is_goal_state():
-        return 0
+    cached = ctx.memo_nearest.get(boxes)
+    if cached is not None:
+        return cached
 
-    dist_cache = get_precomputed_distances(state)
+    dead = ctx.dead
+    rows = ctx.rows
     total = 0
+    for b in boxes:
+        if b in dead:
+            total = DEADLOCK_VALUE
+            break
+        row = rows.get(b)
+        if row is None:
+            total = DEADLOCK_VALUE
+            break
+        total += min(row)
+        if total >= DEADLOCK_VALUE:
+            total = DEADLOCK_VALUE
+            break
 
-    for box in state.boxes:
-        min_d = float('inf')
-        for goal in state.goals:
-            d = dist_cache.get(goal, {}).get(box, float('inf'))
-            if d < min_d:
-                min_d = d
-        if min_d == float('inf'):
-            return 100_000
-        total += min_d
-
+    if len(ctx.memo_nearest) >= _MEMO_LIMIT:
+        ctx.memo_nearest.clear()
+    ctx.memo_nearest[boxes] = total
     return total
 
 
 def heuristic_zero(state: State) -> int:
-    """Trivial heuristic h(n) = 0; reduces A* to Uniform Cost Search. Used as a baseline."""
+    """h(n) = 0; reduces A* to Uniform Cost Search (baseline)."""
     return 0
 
 
-def verify_admissibility(
-    h_value: int,
-    optimal_cost_to_goal: int
-) -> Tuple[bool, str]:
-    """
-    Check the admissibility condition: h(n) <= h*(n).
-    Returns (is_admissible, message).
-    """
-    is_valid = h_value <= optimal_cost_to_goal
+# Property checks
+def verify_admissibility(h_value: int, optimal_cost_to_goal: int) -> Tuple[bool, str]:
+    """Check h(n) <= h*(n)."""
+    ok = h_value <= optimal_cost_to_goal
     msg = (f"h(n)={h_value} <= h*(n)={optimal_cost_to_goal} [PASS - Admissible]"
-           if is_valid else
+           if ok else
            f"h(n)={h_value} > h*(n)={optimal_cost_to_goal} [VIOLATION]")
-    return is_valid, msg
+    return ok, msg
 
 
-def verify_consistency(
-    h_current: int,
-    step_cost: int,
-    h_next: int
-) -> Tuple[bool, str]:
-    """
-    Check the consistency condition (triangle inequality): h(n) <= c(n, n') + h(n').
-    Returns (is_consistent, message).
-    """
-    is_valid = h_current <= step_cost + h_next
+def verify_consistency(h_current: int, step_cost: int, h_next: int) -> Tuple[bool, str]:
+    """Check h(n) <= c(n, n') + h(n')."""
+    ok = h_current <= step_cost + h_next
     msg = (f"h(n)={h_current} <= c(n,n')={step_cost} + h(n')={h_next} [PASS - Consistent]"
-           if is_valid else
+           if ok else
            f"h(n)={h_current} > {step_cost + h_next} [VIOLATION]")
-    return is_valid, msg
+    return ok, msg
 
 
 if __name__ == "__main__":
-    print("Module heuristic.py is ready.")
-    print("Default heuristic: heuristic_maze_min_matching (no Manhattan/Euclidean distance used).")
+    mode = "push distance" if USE_PUSH_DISTANCE else "maze (walking) distance"
+    print(f"Module heuristic.py is ready. Default heuristic: heuristic_maze_min_matching ({mode}).")
