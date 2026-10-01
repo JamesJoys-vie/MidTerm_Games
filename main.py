@@ -1,13 +1,12 @@
 def print_banner():
     print("\n" + "=" * 70)
-    print("=========SOKOBAN AI SOLVER & TWO-AGENT ARENA=========")
-    print("=========Midterm Project - Introduction to AI (TDTU)=======")
+    print("         SOKOBAN with AI Solving Project")
+    print("    Midterm Project - Introduction to AI (TDTU)")
     print("=" * 70)
     print("1. [Benchmark]   Run UCS vs A* experiments & Heuristic verification")
     print("2. [Single GUI]  Open Pygame 1-Agent Solver (UCS & A*, Step by Step)")
     print("3. [2-Agent GUI] Open Pygame 2-Agent Competitive Arena")
     print("4. [Quick Test]  Run console search test on sample maps")
-    print("5. [Tutorial]    Open system tutorial file TUTORIAL_HUONG_DAN_HE_THONG.md")
     print("0. [Exit]        Exit the program")
     print("=" * 70)
 
@@ -58,14 +57,44 @@ def run_quick_test():
     from search_algorithms import ucs_search, astar_search, bfs_search, gbfs_search
     from heuristic import heuristic_maze_min_matching
 
-    p = MapParser("maps/test_hard.txt")
+    print("   Select map:")
+    print("   1. maps/test_small.txt (Default)")
+    print("   2. maps/test_hard.txt")
+    print("   3. maps/example_map.txt")
+    print("   4. maps/test_medium.txt")
+    choice = input("   Enter choice (default 1 ['test_small.txt']): ").strip()
+
+    map_file = "maps/test_small.txt"
+    if choice == "2":
+        map_file = "maps/test_hard.txt"
+    elif choice == "3":
+        map_file = "maps/example_map.txt"
+    elif choice == "4":
+        map_file = "maps/test_medium.txt"
+
+    p = MapParser(map_file)
     st = p.get_initial_state()
 
-    print(f"Map: {p.filename}")
-    print("1. UCS  :", ucs_search(st)['path'])
-    print("2. A*   :", astar_search(st, heuristic=heuristic_maze_min_matching)['path'])
-    print("3. BFS  :", bfs_search(st)['path'])
-    print("4. GBFS :", gbfs_search(st, heuristic=heuristic_maze_min_matching)['path'])
+    print(f"\nMap: {p.filename}")
+
+    res_ucs = ucs_search(st)
+    res_astar = astar_search(st, heuristic=heuristic_maze_min_matching)
+    res_bfs = bfs_search(st)
+    res_gbfs = gbfs_search(st, heuristic=heuristic_maze_min_matching)
+
+    results = [
+        ("1. UCS  ", res_ucs),
+        ("2. A*   ", res_astar),
+        ("3. BFS  ", res_bfs),
+        ("4. GBFS ", res_gbfs),
+    ]
+
+    for name, res in results:
+        if res.get('success') and res.get('path') is not None:
+            total_steps = len(res['path'])
+            print(f"{name}: Total Steps = {total_steps:<3} | Path = {res['path']}")
+        else:
+            print(f"{name}: Search Failed / Timed out")
 
 
 def main():
@@ -81,8 +110,6 @@ def main():
             run_competitive_gui()
         elif choice == "4":
             run_quick_test()
-        elif choice == "5":
-            print("\n📖 Detailed tutorial is located at: TUTORIAL_HUONG_DAN_HE_THONG.md")
         elif choice == "0":
             print("\nThank you for using the program!")
             break

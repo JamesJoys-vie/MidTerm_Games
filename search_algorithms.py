@@ -4,15 +4,8 @@ import heapq
 from collections import deque
 from typing import List, Tuple, Dict, Set, Optional, Callable, Any
 
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
-
 from map_parser import State, identify_corner_deadlocks
 from heuristic import heuristic_maze_min_matching
-
 
 DIRECTIONS = {
     'North': (0, -1),
@@ -20,9 +13,7 @@ DIRECTIONS = {
     'East':  (1, 0),
     'West':  (-1, 0)
 }
-
 ACTION_NAMES = ['North', 'South', 'East', 'West']
-
 
 def get_possible_actions(state: State) -> List[str]:
     """
@@ -41,7 +32,6 @@ def get_possible_actions(state: State) -> List[str]:
 
         if next_ax < 0 or next_ax >= width or next_ay < 0 or next_ay >= height:
             continue
-
         if grid[next_ay][next_ax] == '%':
             continue
 
@@ -58,7 +48,6 @@ def get_possible_actions(state: State) -> List[str]:
 
             if (pushed_box_x, pushed_box_y) in state.boxes:
                 continue
-
         valid_actions.append(action)
 
     return valid_actions
@@ -93,7 +82,6 @@ def execute_action(state: State, action: str) -> Tuple[State, int]:
         cost=state.cost + step_cost,
         heuristic_value=0
     )
-
     return next_state, step_cost
 
 
@@ -156,15 +144,11 @@ def ucs_search(
         q_len = len(queue)
         if q_len > max_queue_size:
             max_queue_size = q_len
-
         if time.time() - start_time > time_limit:
             break
-
         g, apos, boxes_tuple, node_idx = popleft()
-
         if g > visited.get((apos, boxes_tuple), g):
             continue
-
         nodes_explored += 1
         current_state_boxes = frozenset(boxes_tuple)
 
@@ -194,7 +178,6 @@ def ucs_search(
                 'execution_time': elapsed_time,
                 'memory_used_mb': mem_estimate
             }
-
         ax, ay = apos
         boxes_set = set(boxes_tuple)
 
@@ -345,7 +328,6 @@ def bfs_search(
 ) -> Dict[str, Any]:
     """
     Breadth-First Search (BFS): explores states layer by layer using a FIFO queue.
-    Finds the solution with the fewest number of actions.
     """
     if goal_test is None:
         goal_test = lambda s: s.is_goal_state()
@@ -450,7 +432,6 @@ def gbfs_search(
 ) -> Dict[str, Any]:
     """
     Greedy Best-First Search (GBFS): selects nodes purely by heuristic value f(n) = h(n).
-    Fast and suitable for agent decision-making within tight time limits (<= 1000ms).
     """
     if goal_test is None:
         goal_test = lambda s: s.is_goal_state()
@@ -510,9 +491,11 @@ if __name__ == "__main__":
         print(f"--- Running solver test: {p.filename} ---")
 
         res_ucs = ucs_search(init_st)
-        print(f"[UCS] Success={res_ucs['success']}, Cost={res_ucs['cost']}, Nodes={res_ucs['nodes_explored']}, Time={res_ucs['execution_time']:.4f}s, Path={res_ucs['path']}")
+        ucs_steps = len(res_ucs['path']) if res_ucs['path'] else 0
+        print(f"[UCS] Success={res_ucs['success']}, Cost={res_ucs['cost']}, Steps={ucs_steps}, Nodes={res_ucs['nodes_explored']}, Time={res_ucs['execution_time']:.4f}s, Path={res_ucs['path']}")
 
         res_astar = astar_search(init_st)
-        print(f"[A* ] Success={res_astar['success']}, Cost={res_astar['cost']}, Nodes={res_astar['nodes_explored']}, Time={res_astar['execution_time']:.4f}s, Path={res_astar['path']}")
+        astar_steps = len(res_astar['path']) if res_astar['path'] else 0
+        print(f"[A* ] Success={res_astar['success']}, Cost={res_astar['cost']}, Steps={astar_steps}, Nodes={res_astar['nodes_explored']}, Time={res_astar['execution_time']:.4f}s, Path={res_astar['path']}")
     except Exception as err:
         print(f"Error: {err}")
