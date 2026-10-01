@@ -10,7 +10,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from map_parser import State
+from map_parser import State, identify_corner_deadlocks
 from heuristic import heuristic_maze_min_matching
 
 
@@ -103,17 +103,17 @@ def ucs_search(
     time_limit: float = 60.0
 ) -> Dict[str, Any]:
     """
-    Uniform Cost Search (UCS): expands nodes in order of increasing path cost g(n).
-    Guaranteed to find the optimal solution when all step costs are positive.
+    Optimized Uniform Cost Search (UCS): expands nodes in order of path cost g(n).
+    Utilizes FIFO deque queueing, parent-pointer path reconstruction, and corner deadlock pruning.
     """
-    if goal_test is None:
-        goal_test = lambda s: s.is_goal_state()
-
     start_time = time.time()
-    nodes_explored = 0
-    max_queue_size = 0
+    
+    if goal_test is not None:
+        is_goal = goal_test
+    else:
+        is_goal = lambda s: s.is_goal_state()
 
-    if goal_test(initial_state):
+    if is_goal(initial_state):
         return {
             'algorithm': 'UCS',
             'success': True,
@@ -125,30 +125,65 @@ def ucs_search(
             'memory_used_mb': 0.0
         }
 
-    counter = 0
-    pq = []
-    heapq.heappush(pq, (0, counter, initial_state, []))
+    grid = initial_state.grid
+    height = len(grid)
+    width = len(grid[0]) if height > 0 else 0
+    goals = initial_state.goals
+    deadlocks = identify_corner_deadlocks(grid, goals)
+    wall_matrix = [[(grid[y][x] == '%') for x in range(width)] for y in range(height)]
 
-    best_g: Dict[Tuple[Tuple[int, int], FrozenSet[Tuple[int, int]]], int] = {}
-    best_g[(initial_state.agent_pos, initial_state.boxes)] = 0
+    start_pos = initial_state.agent_pos
+    start_boxes = tuple(sorted(initial_state.boxes))
+    
+    queue = deque([(0, start_pos, start_boxes, 0)])
+    nodes = [(None, None)]
+    visited: Dict[Tuple[Tuple[int, int], Tuple[Tuple[int, int], ...]], int] = {(start_pos, start_boxes): 0}
 
-    while pq:
-        max_queue_size = max(max_queue_size, len(pq))
+    dirs = (
+        ('North', 0, -1),
+        ('South', 0, 1),
+        ('East', 1, 0),
+        ('West', -1, 0)
+    )
+
+    nodes_explored = 0
+    max_queue_size = 0
+    popleft = queue.popleft
+    append = queue.append
+    nodes_append = nodes.append
+
+    while queue:
+        q_len = len(queue)
+        if q_len > max_queue_size:
+            max_queue_size = q_len
 
         if time.time() - start_time > time_limit:
             break
 
-        g, _, current_state, path = heapq.heappop(pq)
-        state_key = (current_state.agent_pos, current_state.boxes)
+        g, apos, boxes_tuple, node_idx = popleft()
 
-        if g > best_g.get(state_key, float('inf')):
+        if g > visited.get((apos, boxes_tuple), g):
             continue
 
         nodes_explored += 1
+        current_state_boxes = frozenset(boxes_tuple)
 
-        if goal_test(current_state):
+        if goal_test is None:
+            goal_reached = (current_state_boxes == goals)
+        else:
+            dummy_state = State(agent_pos=apos, boxes=current_state_boxes, goals=goals, grid=grid, cost=g)
+            goal_reached = is_goal(dummy_state)
+
+        if goal_reached:
+            curr = node_idx
+            path = []
+            while curr is not None and nodes[curr][0] is not None:
+                p_idx, act = nodes[curr]
+                path.append(act)
+                curr = p_idx
+            path.reverse()
             elapsed_time = time.time() - start_time
-            mem_estimate = (sys.getsizeof(best_g) + sys.getsizeof(pq)) / (1024 * 1024)
+            mem_estimate = (sys.getsizeof(visited) + sys.getsizeof(queue) + sys.getsizeof(nodes)) / (1024 * 1024)
             return {
                 'algorithm': 'UCS',
                 'success': True,
@@ -160,18 +195,41 @@ def ucs_search(
                 'memory_used_mb': mem_estimate
             }
 
-        for action in get_possible_actions(current_state):
-            next_state, step_cost = execute_action(current_state, action)
-            next_g = g + step_cost
-            next_key = (next_state.agent_pos, next_state.boxes)
+        ax, ay = apos
+        boxes_set = set(boxes_tuple)
 
-            if next_g < best_g.get(next_key, float('inf')):
-                best_g[next_key] = next_g
-                counter += 1
-                heapq.heappush(pq, (next_g, counter, next_state, path + [action]))
+        for act_name, dx, dy in dirs:
+            nax, nay = ax + dx, ay + dy
+            if nax < 0 or nax >= width or nay < 0 or nay >= height:
+                continue
+            if wall_matrix[nay][nax]:
+                continue
+
+            npos = (nax, nay)
+            if npos in boxes_set:
+                nbx, nby = nax + dx, nay + dy
+                if nbx < 0 or nbx >= width or nby < 0 or nby >= height:
+                    continue
+                if wall_matrix[nby][nbx]:
+                    continue
+                nbpos = (nbx, nby)
+                if nbpos in boxes_set:
+                    continue
+                if nbpos in deadlocks:
+                    continue
+                new_boxes_tuple = tuple(sorted(nbpos if b == npos else b for b in boxes_tuple))
+            else:
+                new_boxes_tuple = boxes_tuple
+
+            next_key = (npos, new_boxes_tuple)
+            next_g = g + 1
+            if next_key not in visited or next_g < visited[next_key]:
+                visited[next_key] = next_g
+                nodes_append((node_idx, act_name))
+                append((next_g, npos, new_boxes_tuple, len(nodes) - 1))
 
     elapsed_time = time.time() - start_time
-    mem_estimate = (sys.getsizeof(best_g) + sys.getsizeof(pq)) / (1024 * 1024)
+    mem_estimate = (sys.getsizeof(visited) + sys.getsizeof(queue) + sys.getsizeof(nodes)) / (1024 * 1024)
     return {
         'algorithm': 'UCS',
         'success': False,
