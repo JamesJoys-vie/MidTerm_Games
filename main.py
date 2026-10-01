@@ -58,7 +58,7 @@ def run_quick_test():
     from search_algorithms import ucs_search, astar_search, bfs_search, gbfs_search
     from heuristic import heuristic_maze_min_matching
 
-    p = MapParser("maps/test_small.txt")
+    p = MapParser("maps/test_hard.txt")
     st = p.get_initial_state()
 
     print(f"Map: {p.filename}")
