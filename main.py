@@ -100,7 +100,7 @@ def run_quick_test():
 def main():
     while True:
         print_banner()
-        choice = input("Enter your choice (0-5): ").strip()
+        choice = input("Enter your choice (0-4): ").strip()
 
         if choice == "1":
             run_benchmark()

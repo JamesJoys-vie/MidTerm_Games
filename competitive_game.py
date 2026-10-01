@@ -97,6 +97,8 @@ def resolve_simultaneous_step(
 
     if push1_from and push1_from == push2_from:
         return agent1_pos, agent2_pos, boxes1, boxes2
+    if push1_to and push2_to and push1_to == push2_to:
+        return agent1_pos, agent2_pos, boxes1, boxes2
     if push1_to and new_a2 == push1_to:
         return agent1_pos, agent2_pos, boxes1, boxes2
     if push2_to and new_a1 == push2_to:
