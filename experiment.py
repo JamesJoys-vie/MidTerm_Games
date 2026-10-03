@@ -99,7 +99,7 @@ class PerformanceBenchmark:
         if not self.results:
             return
         print("\n" + "=" * 95)
-        print("EXPERIMENT RESULTS SUMMARY TABLE (MARKDOWN FORMAT)")
+        print("EXPERIMENT RESULTS SUMMARY TABLE")
         print("=" * 95)
         header = "| Map Name | Cost | UCS Time (s) | A* Time (s) | UCS Nodes | A* Nodes | Node Reduction (%) |"
         sep = "|:---|:---:|:---:|:---:|:---:|:---:|:---:|"
