@@ -237,7 +237,8 @@ def main():
     test_maps = [
         "maps/example_map.txt",
         "maps/test_small.txt",
-        "maps/test_medium.txt"
+        "maps/test_medium.txt",
+        "maps/test_hard.txt"
     ]
 
     print("\n" + "=" * 75)
