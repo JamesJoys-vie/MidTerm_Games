@@ -2,7 +2,7 @@ import sys
 import time
 import heapq
 from collections import deque
-from typing import List, Tuple, Dict, Set, Optional, Callable, Any
+from typing import List, Tuple, Dict, FrozenSet, Optional, Callable, Any
 
 from map_parser import State, identify_corner_deadlocks
 from heuristic import heuristic_maze_min_matching
