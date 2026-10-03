@@ -4,7 +4,7 @@ from collections import deque
 from typing import Tuple, List, Set, FrozenSet, Optional, Dict
 
 class Agent2Controller:
-    """Independent controller for Agent 2 using Greedy Best-First Search (GBFS)."""
+    """Independent controller for Agent 2 using Greedy Best-First Search"""
 
     def __init__(self, name: str = "Agent 2 (Greedy Best-First Solver)"):
         self.name = name
@@ -42,6 +42,7 @@ class Agent2Controller:
         return deadlocks
 
     def _get_maze_distances(self, grid: Tuple[Tuple[str, ...], ...], target: Tuple[int, int]) -> Dict[Tuple[int, int], int]:
+        """BFS walking distance from `target` to every reachable floor cell (cached per target)."""
         if target in self._maze_dist_cache:
             return self._maze_dist_cache[target]
 
@@ -63,6 +64,12 @@ class Agent2Controller:
         self._maze_dist_cache[target] = dist_map
         return dist_map
 
+    def _walk_dist(self, grid: Tuple[Tuple[str, ...], ...], src: Tuple[int, int], dst: Tuple[int, int]) -> int:
+        """Walking (BFS) distance between two cells. The grid is undirected, so one BFS from dst suffices."""
+        if src == dst:
+            return 0
+        return self._get_maze_distances(grid, dst).get(src, 999)
+
     def _gbfs_plan_box(
         self,
         agent_start: Tuple[int, int],
@@ -81,7 +88,7 @@ class Agent2Controller:
 
         def heuristic(bpos: Tuple[int, int], apos: Tuple[int, int]) -> int:
             base_dist = dist_map.get(bpos, 999)
-            agent_to_box = abs(apos[0] - bpos[0]) + abs(apos[1] - bpos[1])
+            agent_to_box = self._walk_dist(grid, apos, bpos)
             return base_dist * 3 + agent_to_box
 
         init_h = heuristic(box_start, agent_start)
@@ -176,7 +183,8 @@ class Agent2Controller:
         if not uncompleted_my_boxes:
             opp_on_goal = [b for b in opponent_boxes if b in goals]
             if opp_on_goal:
-                target_b = min(opp_on_goal, key=lambda b: abs(b[0] - my_pos[0]) + abs(b[1] - my_pos[1]))
+                # Pick the opponent box closest by walking distance
+                target_b = min(opp_on_goal, key=lambda b: self._walk_dist(grid, my_pos, b))
                 other_b = all_boxes - {target_b}
                 for act, (dx, dy) in self.directions.items():
                     off_goal = (target_b[0] + dx, target_b[1] + dy)
@@ -206,11 +214,15 @@ class Agent2Controller:
         best_plan: Optional[List[str]] = None
         remaining_time = time_limit - (time.time() - start_time)
 
-        sorted_boxes = sorted(uncompleted_my_boxes, key=lambda b: abs(b[0] - my_pos[0]) + abs(b[1] - my_pos[1]))
+        # Sort boxes by walking distance from the agent
+        agent_dist = self._get_maze_distances(grid, my_pos)
+        sorted_boxes = sorted(uncompleted_my_boxes, key=lambda b: agent_dist.get(b, 999))
 
         for b in sorted_boxes:
             other_boxes = all_boxes - {b}
-            sorted_goals = sorted(target_goals, key=lambda g: abs(g[0] - b[0]) + abs(g[1] - b[1]))
+            # Sort goals by walking distance from the box
+            box_dist = self._get_maze_distances(grid, b)
+            sorted_goals = sorted(target_goals, key=lambda g: box_dist.get(g, 999))
             for g in sorted_goals:
                 budget = max(0.1, (remaining_time - (time.time() - start_time)) / 2)
                 plan = self._gbfs_plan_box(

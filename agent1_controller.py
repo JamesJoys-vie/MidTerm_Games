@@ -42,6 +42,7 @@ class Agent1Controller:
         return deadlocks
 
     def _get_maze_distances(self, grid: Tuple[Tuple[str, ...], ...], goal: Tuple[int, int]) -> Dict[Tuple[int, int], int]:
+        """BFS walking distance from `goal` to every reachable floor cell (cached per target)."""
         if goal in self._maze_dist_cache:
             return self._maze_dist_cache[goal]
 
@@ -63,6 +64,12 @@ class Agent1Controller:
         self._maze_dist_cache[goal] = dist_map
         return dist_map
 
+    def _walk_dist(self, grid: Tuple[Tuple[str, ...], ...], src: Tuple[int, int], dst: Tuple[int, int]) -> int:
+        """Walking (BFS) distance between two cells. The grid is undirected, so one BFS from dst suffices."""
+        if src == dst:
+            return 0
+        return self._get_maze_distances(grid, dst).get(src, 999)
+
     def _astar_plan_box(
         self,
         agent_start: Tuple[int, int],
@@ -81,8 +88,9 @@ class Agent1Controller:
 
         def heuristic(bpos: Tuple[int, int], apos: Tuple[int, int]) -> int:
             base_dist = dist_map.get(bpos, 999)
-            agent_to_box = abs(apos[0] - bpos[0]) + abs(apos[1] - bpos[1]) - 1
-            return base_dist * 2 + max(0, agent_to_box)
+            box_to_agent = self._walk_dist(grid, apos, bpos)
+            agent_to_box = max(0, box_to_agent - 1)
+            return base_dist * 2 + agent_to_box
 
         init_h = heuristic(box_start, agent_start)
         counter = 0
@@ -160,11 +168,15 @@ class Agent1Controller:
         best_plan: Optional[List[str]] = None
         remaining_time = time_limit - (time.time() - start_time)
 
-        sorted_boxes = sorted(uncompleted_boxes, key=lambda b: abs(b[0] - my_pos[0]) + abs(b[1] - my_pos[1]))
+        # Sort boxes by walking distance from the agent
+        agent_dist = self._get_maze_distances(grid, my_pos)
+        sorted_boxes = sorted(uncompleted_boxes, key=lambda b: agent_dist.get(b, 999))
 
         for b in sorted_boxes:
             other_boxes = all_boxes - {b}
-            sorted_goals = sorted(target_goals, key=lambda g: abs(g[0] - b[0]) + abs(g[1] - b[1]))
+            # Sort goals by walking distance from the box
+            box_dist = self._get_maze_distances(grid, b)
+            sorted_goals = sorted(target_goals, key=lambda g: box_dist.get(g, 999))
             for g in sorted_goals:
                 budget = max(0.1, (remaining_time - (time.time() - start_time)) / 2)
                 plan = self._astar_plan_box(
