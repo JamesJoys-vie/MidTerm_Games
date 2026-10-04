@@ -11,7 +11,8 @@ from heuristic import (
     verify_admissibility,
     verify_consistency
 )
-from search_algorithms import ucs_search, astar_search, get_possible_actions, execute_action
+from search_algorithms import ucs_search, astar_search
+from game_rules import get_possible_actions, execute_action
 
 
 class PerformanceBenchmark:

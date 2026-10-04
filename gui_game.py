@@ -5,7 +5,8 @@ import pygame
 from typing import List, Dict, Any
 
 from map_parser import MapParser, State
-from search_algorithms import ucs_search, astar_search, execute_action
+from search_algorithms import ucs_search, astar_search
+from game_rules import execute_action
 from heuristic import heuristic_maze_min_matching
 
 
