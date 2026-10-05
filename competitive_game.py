@@ -8,7 +8,6 @@ from map_parser import MapParser, TwoAgentState
 from agent1_controller import Agent1Controller
 from agent2_controller import Agent2Controller
 
-
 COLOR_BG = (24, 26, 32)
 COLOR_PANEL = (33, 37, 46)
 COLOR_PANEL_BORDER = (55, 62, 78)
@@ -51,10 +50,7 @@ def resolve_simultaneous_step(
     boxes2: Set[Tuple[int, int]],
     grid: Tuple[Tuple[str, ...], ...]
 ) -> Tuple[Tuple[int, int], Tuple[int, int], Set[Tuple[int, int]], Set[Tuple[int, int]]]:
-    """
-    Resolve simultaneous actions of two agents for a single game tick.
-    Both agents act at the same time without giving precedence to Agent 1.
-    """
+    
     dirs = {
         'North': (0, -1), 'South': (0, 1),
         'East': (1, 0),  'West': (-1, 0),
@@ -123,8 +119,6 @@ def resolve_simultaneous_step(
 
 
 class CompetitiveGameGUI:
-    """Manages a competitive match between two agents in a Pygame interface."""
-
     def __init__(self, map_path: str = "maps/competitive_map.txt", total_steps_n: int = 60):
         pygame.init()
         pygame.font.init()
@@ -165,6 +159,7 @@ class CompetitiveGameGUI:
 
         self.action1_last = "Ready"
         self.action2_last = "Ready"
+        self.history = []
 
     def step(self):
         if self.is_game_over or self.current_step >= self.max_steps_n:
@@ -190,6 +185,7 @@ class CompetitiveGameGUI:
             time_limit=0.9
         )
 
+        self.history.append((self.state, self.action1_last, self.action2_last))
         self.action1_last = act1
         self.action2_last = act2
 
@@ -238,6 +234,16 @@ class CompetitiveGameGUI:
         self.winner_text = ""
         self.action1_last = "Ready"
         self.action2_last = "Ready"
+        self.history = []
+
+    def step_back(self):
+        if not self.history:
+            return
+        self.is_running = False
+        self.is_game_over = False
+        self.winner_text = ""
+        self.state, self.action1_last, self.action2_last = self.history.pop()
+        self.current_step = self.state.step_count
 
     def handle_events(self) -> bool:
         for event in pygame.event.get():
@@ -254,6 +260,8 @@ class CompetitiveGameGUI:
                 elif event.key == pygame.K_RIGHT:
                     if not self.is_game_over:
                         self.step()
+                elif event.key == pygame.K_LEFT:
+                    self.step_back()
                 elif event.key == pygame.K_UP:
                     self.max_steps_n = min(200, self.max_steps_n + 10)
                 elif event.key == pygame.K_DOWN:
@@ -395,6 +403,7 @@ class CompetitiveGameGUI:
         guide = [
             "• [Space]      : Run / Pause",
             "• [Right Arrow]: Forward a step",
+            "• [Left Arrow] : Backward a step",
             "• [Up / Down]  : Increase / Decrease (10-step)",
             "• [R]          : Reset",
             "• [Esc]        : Quit"
