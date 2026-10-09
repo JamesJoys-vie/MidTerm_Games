@@ -5,7 +5,7 @@ Midterm Project, Introduction to AI (TDTU).
 A Sokoban (push-the-box) project with two modes:
 
 - **Single-agent mode:** solves a whole map with classic search (BFS, DFS, UCS, GBFS, A\*), benchmarks UCS against A\*, and plays the solution back in a Pygame GUI.
-- **Competitive mode:** two AI agents share one map, race to push their own boxes onto the goals for a fixed number of steps, and the one with more boxes on goals wins.
+- **Competitive mode:** two AI agents share one map, race to push neutral boxes onto the goals for a fixed number of steps; each box pushed onto a goal is claimed by the pusher, and the one with more claimed boxes wins.
 
 ---
 
@@ -57,7 +57,7 @@ Maps are plain text files.
 | `1`, `2` | Agent 1 and Agent 2 (competitive maps) |
 | `B` | Box |
 | `D` | Destination (goal) |
-| `C` | Box already standing on a goal |
+| `C` | Box already standing on a goal (in competitive mode: unclaimed, shown yellow) |
 | space | Empty floor |
 
 Single-agent maps must have exactly as many boxes as goals. Competitive maps may have unequal counts. `competitive_map.txt` has 6 boxes and 6 goals.
@@ -108,22 +108,31 @@ The controllers do not search the full state. Each turn they plan **one box to o
 - The distance to the goal is a plain BFS walking distance that ignores boxes.
 - Pushes into non-goal corner cells are skipped.
 
-| | Agent 1 (cyan) | Agent 2 (magenta) |
+Each turn, an agent works through two phases and never sits idle while there is something to do:
+
+1. **Claim neutral boxes first.** If any neutral box (grey or yellow) can be pushed onto an empty goal, the agent takes the shortest such plan. If none can, it nudges a yellow box off its goal (never into a dead corner) so it can be pushed back on as its own.
+2. **Then go after occupied boxes.** Once nothing is left to claim, it picks the best of these by `value / (plan length + 1)`:
+   - **Steal:** push an opponent's box from its goal onto another empty goal. This moves the score gap by 2.
+   - **Knock off:** push an opponent's box off its goal so it turns neutral. The next turn, phase 1 races to claim it.
+
+   Boxes the opponent is closer to are tried last, since the opponent will probably block them. Agent 1 also treats equal distances as guarded.
+
+| | Agent 1 (cyan) — defensive | Agent 2 (magenta) — aggressive |
 |---|---|---|
-| Search | Weighted A\*: `h = 2·dist + max(0, manhattan(agent, box) − 1)` | Greedy best-first: `h = 3·dist + manhattan(agent, box)` |
-| Behaviour | Shorter plans, slower to compute | Faster, less optimal |
-| After finishing its own boxes | Returns `Stay` | Tries to push an opponent's box off a goal, otherwise walks to the map center to block |
+| Search | Weighted A\*: `h = 2·dist + max(0, walk(agent, box) − 1)` | Greedy best-first: `h = 3·dist + walk(agent, box)` |
+| Values (knock off / steal) | 1 / 2 | 1.5 / 3 |
+| Defence (phase 2 only) | Before attacking, blocks the opponent when it comes within 3 steps of a push cell next to one of its claimed boxes. Standing on either side of a box blocks every push along that axis. | None |
+| Every attack blocked | Walks next to an opponent box | Walks next to an opponent box, otherwise to the map center |
+| Face-off (both went for the same cell or push, so the move was cancelled) | Patient: waits up to 2 ticks for the opponent to clear the cell, then plans around it | Impatient: plans around the contested cell on the very next step |
+| Mirroring (bouncing between 2 cells for 4 ticks) | Holds still for a tick | Plans a route away from the opponent for a tick |
 
 Per turn, both agents:
 
 1. Replan from scratch within a time limit of about 1 second.
-2. Try the boxes nearest to them first, and for each box the goals nearest to it first.
-3. Prefer empty goals, falling back to any goal.
-4. Stop early once a plan has 5 steps or fewer.
-5. Execute only the first action of the best plan.
-6. Take any free neighbouring cell if no plan is found.
+2. Try the boxes nearest to them first, and for each box the targets nearest to it first.
+3. Execute only the first action of the best plan.
 
-There is no minimax or opponent model. Adversarial behaviour comes from replanning every turn, from contested goals, and from Agent 2's sabotage.
+There is no minimax search. Adversarial behaviour comes from replanning every turn, from knock-offs turning boxes neutral again, and from Agent 1's blocking.
 
 ---
 
@@ -131,20 +140,22 @@ There is no minimax or opponent model. Adversarial behaviour comes from replanni
 
 **Setup**
 
-- All boxes are sorted by `(x, y)` and split in half. Agent 1 owns the first half and Agent 2 owns the rest.
+- All boxes start **neutral** and unnumbered. Nobody owns a box at the start.
+- Neutral boxes are grey. A `C` box starts on a goal but scores for nobody, and is shown **yellow** until an agent re-occupies it, either by pushing it onto another goal or by nudging it off its goal and pushing it back on.
 - Both agents start at `1` and `2` on the map, and all goals are shared.
 
 **Rules** (`resolve_simultaneous_step` in `competitive_game.py`)
 
 - Both agents choose an action at the same time: `North`, `South`, `East`, `West` or `Stay`. Neither gets priority.
 - Walls, map edges and the other agent's cell block movement.
-- Either agent can push **any** box, including the opponent's. A push fails if the cell behind the box is a wall, another box, or the other agent.
+- Either agent can push **any** box, neutral or claimed. A push fails if the cell behind the box is a wall, another box, or the other agent.
 - If the agents swap cells, enter the same cell, push the same box, or push boxes into the same destination, neither moves that tick.
-- Boxes keep their owner. Only your own boxes standing on goals count toward your score.
+- A box pushed onto a goal is claimed by the agent who pushed it and takes that agent's colour (green `1` for Agent 1, purple `2` for Agent 2). Pushing a box from one goal onto another goal hands it to the pusher.
+- A box pushed off a goal turns neutral again. Only your claimed boxes count toward your score.
 
 **End condition**
 
-The game ends after `n` steps (default 60, adjustable from 20 to 200). The agent with more of its own boxes on goals wins, and ties are possible.
+The game ends after `n` steps (default 60, adjustable from 20 to 200). The agent with more claimed boxes wins, and ties are possible.
 
 ---
 
