@@ -1,10 +1,18 @@
 import time
 import heapq
 from collections import deque
-from typing import Tuple, List, Set, FrozenSet, Optional, Dict
+from typing import Tuple, List, Set, FrozenSet, Optional, Dict, Deque
 
 class Agent2Controller:
     """Independent controller for Agent 2 using Greedy Best-First Search"""
+
+    # Aggressive tuning: steals are worth far more than knock-offs
+    KNOCK_OFF_VALUE = 1.5
+    STEAL_VALUE = 3.0
+
+    # Face-offs: impatient, replans around the contested cell on the very next step
+    PATIENCE = 0
+    STALL_WINDOW = 4
 
     def __init__(self, name: str = "Agent 2 (Greedy Best-First Solver)"):
         self.name = name
@@ -18,6 +26,12 @@ class Agent2Controller:
         }
         self._deadlocks_cache: Optional[Set[Tuple[int, int]]] = None
         self._maze_dist_cache: Dict[Tuple[int, int], Dict[Tuple[int, int], int]] = {}
+        self._recent_pos: Deque[Tuple[int, int]] = deque(maxlen=self.STALL_WINDOW)
+        self._last_pos: Optional[Tuple[int, int]] = None
+        self._last_action = 'Stay'
+        self._face_off_cell: Optional[Tuple[int, int]] = None
+        self._waited = 0
+        self._avoid: Set[Tuple[int, int]] = set()  # Extra cells to plan around this tick
 
     def _get_corner_deadlocks(self, grid: Tuple[Tuple[str, ...], ...], goals: FrozenSet[Tuple[int, int]]) -> Set[Tuple[int, int]]:
         if self._deadlocks_cache is not None:
@@ -162,89 +176,213 @@ class Agent2Controller:
                         q.append(((nx, ny), path + [act]))
         return None
 
+    def _is_free(self, pos: Tuple[int, int], grid: Tuple[Tuple[str, ...], ...], blocked: Set[Tuple[int, int]]) -> bool:
+        height = len(grid)
+        width = len(grid[0]) if height > 0 else 0
+        x, y = pos
+        return 0 <= x < width and 0 <= y < height and grid[y][x] != '%' and pos not in blocked
+
+    def _bfs_paths(
+        self,
+        start: Tuple[int, int],
+        obstacles: Set[Tuple[int, int]],
+        grid: Tuple[Tuple[str, ...], ...]
+    ) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], str]]:
+        """BFS around obstacles. Returns walking distance and first action from `start` for every reachable cell."""
+        dist = {start: 0}
+        first: Dict[Tuple[int, int], str] = {}
+        q = deque([start])
+        while q:
+            curr = q.popleft()
+            for act, (dx, dy) in self.directions.items():
+                nxt = (curr[0] + dx, curr[1] + dy)
+                if nxt not in dist and self._is_free(nxt, grid, obstacles):
+                    dist[nxt] = dist[curr] + 1
+                    first[nxt] = first.get(curr, act)
+                    q.append(nxt)
+        return dist, first
+
+    def _best_box_plan(
+        self,
+        my_pos: Tuple[int, int],
+        box: Tuple[int, int],
+        targets: List[Tuple[int, int]],
+        all_boxes: Set[Tuple[int, int]],
+        opponent_pos: Tuple[int, int],
+        grid: Tuple[Tuple[str, ...], ...],
+        deadlocks: Set[Tuple[int, int]],
+        deadline: float
+    ) -> Optional[List[str]]:
+        """Plans `box` onto the first reachable target, trying targets nearest to the box first."""
+        other_boxes = (all_boxes | self._avoid) - {box}
+        box_dist = self._get_maze_distances(grid, box)
+        for t in sorted(targets, key=lambda t: box_dist.get(t, 999)):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            plan = self._gbfs_plan_box(
+                my_pos, box, t, other_boxes, opponent_pos, grid, deadlocks, max(0.05, remaining / 2)
+            )
+            if plan:
+                return plan
+        return None
+
+    def _knock_off_cells(
+        self,
+        box: Tuple[int, int],
+        goals: FrozenSet[Tuple[int, int]],
+        all_boxes: Set[Tuple[int, int]],
+        grid: Tuple[Tuple[str, ...], ...]
+    ) -> List[Tuple[int, int]]:
+        """Non-goal neighbours a box on a goal can be pushed onto, which turns it neutral."""
+        cells = []
+        for dx, dy in self.directions.values():
+            off = (box[0] + dx, box[1] + dy)
+            if off not in goals and self._is_free(off, grid, all_boxes):
+                cells.append(off)
+        return cells
+
     def get_action(
         self,
         my_pos: Tuple[int, int],
         opponent_pos: Tuple[int, int],
         my_boxes: FrozenSet[Tuple[int, int]],
         opponent_boxes: FrozenSet[Tuple[int, int]],
+        neutral_boxes: FrozenSet[Tuple[int, int]],
         goals: FrozenSet[Tuple[int, int]],
         grid: Tuple[Tuple[str, ...], ...],
         time_limit: float = 0.95
     ) -> str:
-        start_time = time.time()
+        all_boxes = set(my_boxes) | set(opponent_boxes) | set(neutral_boxes)
+        self._avoid = set()
+        self._recent_pos.append(my_pos)
+        action = None
+
+        # A move that left us in place was cancelled by the resolver: both agents went for
+        # the same cell (or the same push). That cell is now contested.
+        if self._last_action in self.directions and my_pos == self._last_pos:
+            self._face_off_cell = self._contested_cell(my_pos, self._last_action, all_boxes)
+            self._waited = 0
+
+        if self._face_off_cell is not None:
+            cell = self._face_off_cell
+            if abs(opponent_pos[0] - cell[0]) + abs(opponent_pos[1] - cell[1]) > 1:
+                self._face_off_cell = None  # The opponent cleared out: carry on with the plan
+            elif self._waited < self.PATIENCE:
+                self._waited += 1
+                action = 'Stay'
+            else:
+                self._avoid = {cell}  # Done waiting: find another way around the contested cell
+                self._face_off_cell = None
+        elif len(self._recent_pos) == self.STALL_WINDOW and len(set(self._recent_pos)) == 2:
+            # Bouncing between two cells while the opponent mirrors us: route away from it this tick
+            self._recent_pos.clear()
+            self._avoid = {(opponent_pos[0] + dx, opponent_pos[1] + dy) for dx, dy in self.directions.values()}
+
+        if action is None:
+            action = self._choose_action(
+                my_pos, opponent_pos, my_boxes, opponent_boxes, neutral_boxes, goals, grid, time_limit
+            )
+        self._last_pos, self._last_action = my_pos, action
+        return action
+
+    def _contested_cell(
+        self,
+        my_pos: Tuple[int, int],
+        action: str,
+        all_boxes: Set[Tuple[int, int]]
+    ) -> Tuple[int, int]:
+        """The cell our cancelled move fought over: the step target, or where a pushed box was headed."""
+        dx, dy = self.directions[action]
+        cell = (my_pos[0] + dx, my_pos[1] + dy)
+        if cell in all_boxes:
+            cell = (cell[0] + dx, cell[1] + dy)
+        return cell
+
+    def _choose_action(
+        self,
+        my_pos: Tuple[int, int],
+        opponent_pos: Tuple[int, int],
+        my_boxes: FrozenSet[Tuple[int, int]],
+        opponent_boxes: FrozenSet[Tuple[int, int]],
+        neutral_boxes: FrozenSet[Tuple[int, int]],
+        goals: FrozenSet[Tuple[int, int]],
+        grid: Tuple[Tuple[str, ...], ...],
+        time_limit: float = 0.95
+    ) -> str:
+        """
+        Aggressive policy:
+        1. Claim the neutral box with the shortest plan onto an empty goal. An unclaimed box
+           already on a goal is pushed onto another goal, or nudged off so it can be pushed back.
+        2. Once no neutral box can be claimed, steal or knock off opponent boxes, preferring
+           ones the opponent is not closer to, with steals weighted well above knock-offs.
+        3. If every attack is blocked for now, close in on the opponent's boxes, otherwise hold the center.
+        """
+        deadline = time.time() + time_limit * 0.9
         height = len(grid)
         width = len(grid[0]) if height > 0 else 0
-        all_boxes = set(my_boxes) | set(opponent_boxes)
+        all_boxes = set(my_boxes) | set(opponent_boxes) | set(neutral_boxes)
         deadlocks = self._get_corner_deadlocks(grid, goals)
-
-        uncompleted_my_boxes = [b for b in my_boxes if b not in goals]
-
-        if not uncompleted_my_boxes:
-            opp_on_goal = [b for b in opponent_boxes if b in goals]
-            if opp_on_goal:
-                # Pick the opponent box closest by walking distance
-                target_b = min(opp_on_goal, key=lambda b: self._walk_dist(grid, my_pos, b))
-                other_b = all_boxes - {target_b}
-                for act, (dx, dy) in self.directions.items():
-                    off_goal = (target_b[0] + dx, target_b[1] + dy)
-                    if 0 <= off_goal[0] < width and 0 <= off_goal[1] < height:
-                        if off_goal not in goals and off_goal not in other_b and grid[off_goal[1]][off_goal[0]] != '%':
-                            plan = self._gbfs_plan_box(
-                                my_pos, target_b, off_goal, other_b, opponent_pos, grid, deadlocks, 0.4
-                            )
-                            if plan:
-                                action = plan[0]
-                                self.action_history.append(action)
-                                return action
-
-            center_spots = {(width // 2, height // 2), (width // 2 - 1, height // 2), (width // 2 + 1, height // 2)}
-            valid_center = {s for s in center_spots if 0 <= s[0] < width and 0 <= s[1] < height and grid[s[1]][s[0]] != '%' and s not in all_boxes and s != opponent_pos}
-            if valid_center and my_pos not in valid_center:
-                move = self._bfs_navigate(my_pos, valid_center, all_boxes | {opponent_pos}, grid)
-                if move:
-                    self.action_history.append(move)
-                    return move
-
-            return 'Stay'
-
         empty_goals = [g for g in goals if g not in all_boxes]
-        target_goals = empty_goals if empty_goals else list(goals)
-
-        best_plan: Optional[List[str]] = None
-        remaining_time = time_limit - (time.time() - start_time)
-
-        # Sort boxes by walking distance from the agent
         agent_dist = self._get_maze_distances(grid, my_pos)
-        sorted_boxes = sorted(uncompleted_my_boxes, key=lambda b: agent_dist.get(b, 999))
 
-        for b in sorted_boxes:
-            other_boxes = all_boxes - {b}
-            # Sort goals by walking distance from the box
-            box_dist = self._get_maze_distances(grid, b)
-            sorted_goals = sorted(target_goals, key=lambda g: box_dist.get(g, 999))
-            for g in sorted_goals:
-                budget = max(0.1, (remaining_time - (time.time() - start_time)) / 2)
-                plan = self._gbfs_plan_box(
-                    my_pos, b, g, other_boxes, opponent_pos, grid, deadlocks, budget
-                )
+        # Every neutral box is up for grabs, including unclaimed ones already on a goal ('C' cells)
+        claimables = sorted(neutral_boxes, key=lambda b: agent_dist.get(b, 999))
+        claims = []
+        if empty_goals:
+            for b in claimables:
+                plan = self._best_box_plan(my_pos, b, empty_goals, all_boxes, opponent_pos, grid, deadlocks, deadline)
                 if plan:
-                    if best_plan is None or len(plan) < len(best_plan):
-                        best_plan = plan
-                    break
-            if best_plan and len(best_plan) <= 5:
-                break
-
-        if best_plan:
-            action = best_plan[0]
+                    claims.append(plan)
+        if not claims:
+            # No goal to move it to: nudge an unclaimed goal box off its goal so it can be pushed back as ours
+            for b in claimables:
+                if b in goals:
+                    cells = [c for c in self._knock_off_cells(b, goals, all_boxes, grid) if c not in deadlocks]
+                    plan = self._best_box_plan(my_pos, b, cells, all_boxes, opponent_pos, grid, deadlocks, deadline)
+                    if plan:
+                        claims.append(plan)
+        if claims:
+            action = min(claims, key=len)[0]
             self.action_history.append(action)
             return action
 
-        for act, (dx, dy) in self.directions.items():
-            nx = my_pos[0] + dx
-            ny = my_pos[1] + dy
-            if 0 <= nx < width and 0 <= ny < height:
-                if grid[ny][nx] != '%' and (nx, ny) != opponent_pos and (nx, ny) not in all_boxes:
-                    return act
+        # Contest any box the opponent is not strictly closer to first; guarded ones only lure us around
+        targets = sorted(opponent_boxes, key=lambda b: agent_dist.get(b, 999))
+        unguarded = [b for b in targets if self._walk_dist(grid, opponent_pos, b) >= agent_dist.get(b, 999)]
+        guarded = [b for b in targets if b not in unguarded]
+        for group in (unguarded, guarded):
+            options = []  # (value per step, -plan length, plan)
+            for b in group:
+                for value, cells in ((self.STEAL_VALUE, empty_goals),
+                                     (self.KNOCK_OFF_VALUE, self._knock_off_cells(b, goals, all_boxes, grid))):
+                    plan = self._best_box_plan(my_pos, b, cells, all_boxes, opponent_pos, grid, deadlocks, deadline)
+                    if plan:
+                        options.append((value / (len(plan) + 1), -len(plan), plan))
+            if options:
+                action = max(options)[2][0]
+                self.action_history.append(action)
+                return action
+
+        # Every attack is blocked for now: get next to an opponent box to keep up the pressure
+        obstacles = all_boxes | {opponent_pos} | self._avoid
+        attack_spots = {
+            (b[0] + dx, b[1] + dy)
+            for b in opponent_boxes for dx, dy in self.directions.values()
+            if self._is_free((b[0] + dx, b[1] + dy), grid, obstacles)
+        }
+        if attack_spots and my_pos not in attack_spots:
+            move = self._bfs_navigate(my_pos, attack_spots, obstacles, grid)
+            if move:
+                self.action_history.append(move)
+                return move
+
+        center_spots = {(width // 2, height // 2), (width // 2 - 1, height // 2), (width // 2 + 1, height // 2)}
+        valid_center = {s for s in center_spots if self._is_free(s, grid, obstacles)}
+        if not attack_spots and valid_center and my_pos not in valid_center:
+            move = self._bfs_navigate(my_pos, valid_center, obstacles, grid)
+            if move:
+                self.action_history.append(move)
+                return move
 
         return 'Stay'
