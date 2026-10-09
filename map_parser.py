@@ -39,10 +39,12 @@ class State:
 class TwoAgentState:
     """
     Represents a search state for the competitive two-agent Sokoban mode.
-    Tracks both agents' positions and each agent's assigned box set separately.
+    Boxes start neutral. A box is claimed by the agent that pushes it onto a goal
+    and turns neutral again if it is pushed off a goal.
     """
     agent1_pos: Tuple[int, int]
     agent2_pos: Tuple[int, int]
+    boxes_neutral: FrozenSet[Tuple[int, int]] = field(default_factory=frozenset)
     boxes_agent1: FrozenSet[Tuple[int, int]] = field(default_factory=frozenset)
     boxes_agent2: FrozenSet[Tuple[int, int]] = field(default_factory=frozenset)
     goals: FrozenSet[Tuple[int, int]] = field(default_factory=frozenset)
@@ -51,17 +53,18 @@ class TwoAgentState:
 
     @property
     def all_boxes(self) -> FrozenSet[Tuple[int, int]]:
-        """Returns the combined set of all boxes from both agents."""
-        return self.boxes_agent1 | self.boxes_agent2
+        """Returns the combined set of all boxes (neutral and claimed)."""
+        return self.boxes_neutral | self.boxes_agent1 | self.boxes_agent2
 
     def __hash__(self) -> int:
-        return hash((self.agent1_pos, self.agent2_pos, self.boxes_agent1, self.boxes_agent2))
+        return hash((self.agent1_pos, self.agent2_pos, self.boxes_neutral, self.boxes_agent1, self.boxes_agent2))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TwoAgentState):
             return False
         return (self.agent1_pos == other.agent1_pos and
                 self.agent2_pos == other.agent2_pos and
+                self.boxes_neutral == other.boxes_neutral and
                 self.boxes_agent1 == other.boxes_agent1 and
                 self.boxes_agent2 == other.boxes_agent2)
 
@@ -209,18 +212,14 @@ class MapParser:
     def get_two_agent_initial_state(self) -> TwoAgentState:
         """
         Returns the initial state for competitive two-agent mode.
-        Splits the box list evenly between the two agents.
+        Every box starts neutral; agents claim boxes by pushing them onto goals.
         """
-        sorted_boxes = sorted(list(self.boxes))
-        half = len(sorted_boxes) // 2
-        boxes1 = frozenset(sorted_boxes[:half])
-        boxes2 = frozenset(sorted_boxes[half:])
-
         return TwoAgentState(
             agent1_pos=self.agent1_pos if self.agent1_pos else (1, 1),
             agent2_pos=self.agent2_pos if self.agent2_pos else (self.width - 2, self.height - 2),
-            boxes_agent1=boxes1,
-            boxes_agent2=boxes2,
+            boxes_neutral=frozenset(self.boxes),
+            boxes_agent1=frozenset(),
+            boxes_agent2=frozenset(),
             goals=frozenset(self.goals),
             grid=self.initial_state.grid,
             step_count=0

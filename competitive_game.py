@@ -30,6 +30,11 @@ COLOR_AGENT2_BORDER = (225, 29, 72)
 COLOR_BOX_AGENT2 = (168, 85, 247)
 COLOR_BOX_AGENT2_BORDER = (147, 51, 234)
 
+COLOR_BOX_NEUTRAL = (156, 163, 175)
+COLOR_BOX_NEUTRAL_BORDER = (107, 114, 128)
+COLOR_BOX_UNCLAIMED_GOAL = (250, 204, 21)
+COLOR_BOX_UNCLAIMED_GOAL_BORDER = (202, 138, 4)
+
 COLOR_BOX_DONE_BORDER = (245, 158, 11)
 
 COLOR_TEXT_MAIN = (243, 244, 246)
@@ -46,11 +51,18 @@ def resolve_simultaneous_step(
     agent2_pos: Tuple[int, int],
     action1: str,
     action2: str,
+    boxes_neutral: Set[Tuple[int, int]],
     boxes1: Set[Tuple[int, int]],
     boxes2: Set[Tuple[int, int]],
+    goals: Set[Tuple[int, int]],
     grid: Tuple[Tuple[str, ...], ...]
-) -> Tuple[Tuple[int, int], Tuple[int, int], Set[Tuple[int, int]], Set[Tuple[int, int]]]:
-    
+) -> Tuple[Tuple[int, int], Tuple[int, int], Set[Tuple[int, int]], Set[Tuple[int, int]], Set[Tuple[int, int]]]:
+    """
+    Resolves one simultaneous tick. A box pushed onto a goal is claimed by the pusher;
+    a box pushed onto a non-goal cell becomes neutral.
+    Returns (agent1_pos, agent2_pos, boxes_neutral, boxes1, boxes2).
+    """
+
     dirs = {
         'North': (0, -1), 'South': (0, 1),
         'East': (1, 0),  'West': (-1, 0),
@@ -61,17 +73,18 @@ def resolve_simultaneous_step(
 
     height = len(grid)
     width = len(grid[0]) if height > 0 else 0
-    all_boxes = set(boxes1) | set(boxes2)
+    all_boxes = set(boxes_neutral) | set(boxes1) | set(boxes2)
+    unchanged = (agent1_pos, agent2_pos, boxes_neutral, boxes1, boxes2)
 
     cand1 = (agent1_pos[0] + dx1, agent1_pos[1] + dy1)
     cand2 = (agent2_pos[0] + dx2, agent2_pos[1] + dy2)
 
     if cand1 == agent2_pos and cand2 == agent1_pos:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
     if cand1 == cand2 and cand1 != agent1_pos and cand2 != agent2_pos:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
 
-    def eval_agent(pos, cand, dx, dy, other_pos, boxes_self, boxes_other):
+    def eval_agent(pos, cand, dx, dy, other_pos):
         new_pos = pos
         push_from = None
         push_to = None
@@ -88,34 +101,34 @@ def resolve_simultaneous_step(
                     new_pos = cand
         return new_pos, push_from, push_to
 
-    new_a1, push1_from, push1_to = eval_agent(agent1_pos, cand1, dx1, dy1, agent2_pos, boxes1, boxes2)
-    new_a2, push2_from, push2_to = eval_agent(agent2_pos, cand2, dx2, dy2, agent1_pos, boxes2, boxes1)
+    new_a1, push1_from, push1_to = eval_agent(agent1_pos, cand1, dx1, dy1, agent2_pos)
+    new_a2, push2_from, push2_to = eval_agent(agent2_pos, cand2, dx2, dy2, agent1_pos)
 
     if push1_from and push1_from == push2_from:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
     if push1_to and push2_to and push1_to == push2_to:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
     if push1_to and new_a2 == push1_to:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
     if push2_to and new_a1 == push2_to:
-        return agent1_pos, agent2_pos, boxes1, boxes2
+        return unchanged
+    new_neutral = set(boxes_neutral)
     new_boxes1 = set(boxes1)
     new_boxes2 = set(boxes2)
+
+    def apply_push(push_from, push_to, pusher_boxes):
+        for box_set in (new_neutral, new_boxes1, new_boxes2):
+            box_set.discard(push_from)
+        if push_to in goals:
+            pusher_boxes.add(push_to)
+        else:
+            new_neutral.add(push_to)
+
     if push1_from:
-        if push1_from in new_boxes1:
-            new_boxes1.remove(push1_from)
-            new_boxes1.add(push1_to)
-        else:
-            new_boxes2.remove(push1_from)
-            new_boxes2.add(push1_to)
+        apply_push(push1_from, push1_to, new_boxes1)
     if push2_from:
-        if push2_from in new_boxes1:
-            new_boxes1.remove(push2_from)
-            new_boxes1.add(push2_to)
-        else:
-            new_boxes2.remove(push2_from)
-            new_boxes2.add(push2_to)
-    return new_a1, new_a2, new_boxes1, new_boxes2
+        apply_push(push2_from, push2_to, new_boxes2)
+    return new_a1, new_a2, new_neutral, new_boxes1, new_boxes2
 
 
 class CompetitiveGameGUI:
@@ -171,6 +184,7 @@ class CompetitiveGameGUI:
             opponent_pos=self.state.agent2_pos,
             my_boxes=self.state.boxes_agent1,
             opponent_boxes=self.state.boxes_agent2,
+            neutral_boxes=self.state.boxes_neutral,
             goals=self.state.goals,
             grid=self.state.grid,
             time_limit=0.9
@@ -180,6 +194,7 @@ class CompetitiveGameGUI:
             opponent_pos=self.state.agent1_pos,
             my_boxes=self.state.boxes_agent2,
             opponent_boxes=self.state.boxes_agent1,
+            neutral_boxes=self.state.boxes_neutral,
             goals=self.state.goals,
             grid=self.state.grid,
             time_limit=0.9
@@ -189,12 +204,14 @@ class CompetitiveGameGUI:
         self.action1_last = act1
         self.action2_last = act2
 
-        new_a1, new_a2, new_b1, new_b2 = resolve_simultaneous_step(
+        new_a1, new_a2, new_bn, new_b1, new_b2 = resolve_simultaneous_step(
             self.state.agent1_pos,
             self.state.agent2_pos,
             act1, act2,
+            set(self.state.boxes_neutral),
             set(self.state.boxes_agent1),
             set(self.state.boxes_agent2),
+            self.state.goals,
             self.state.grid
         )
 
@@ -202,6 +219,7 @@ class CompetitiveGameGUI:
         self.state = TwoAgentState(
             agent1_pos=new_a1,
             agent2_pos=new_a2,
+            boxes_neutral=frozenset(new_bn),
             boxes_agent1=frozenset(new_b1),
             boxes_agent2=frozenset(new_b2),
             goals=self.state.goals,
@@ -300,6 +318,19 @@ class CompetitiveGameGUI:
             center = (offset_x + gx * ts + ts // 2, offset_y + gy * ts + ts // 2)
             pygame.draw.circle(self.screen, COLOR_GOAL, center, ts // 3, width=3)
             pygame.draw.circle(self.screen, COLOR_GOAL_INNER, center, ts // 6)
+
+        for bx, by in self.state.boxes_neutral:
+            px = offset_x + bx * ts + 5
+            py = offset_y + by * ts + 5
+            rect = pygame.Rect(px, py, ts - 10, ts - 10)
+
+            # A neutral box on a goal (a 'C' cell) scores for nobody until an agent re-occupies it
+            if (bx, by) in self.state.goals:
+                fill, border = COLOR_BOX_UNCLAIMED_GOAL, COLOR_BOX_UNCLAIMED_GOAL_BORDER
+            else:
+                fill, border = COLOR_BOX_NEUTRAL, COLOR_BOX_NEUTRAL_BORDER
+            pygame.draw.rect(self.screen, fill, rect, border_radius=6)
+            pygame.draw.rect(self.screen, border, rect, width=2, border_radius=6)
 
         for bx, by in self.state.boxes_agent1:
             px = offset_x + bx * ts + 5
